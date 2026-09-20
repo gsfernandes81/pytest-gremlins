@@ -8,6 +8,24 @@ and plugin.py.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    import subprocess
+
+LIGHTWEIGHT_CANNOT_RUN_EXIT_CODE = 77
+"""Exit code the lightweight runner uses for "I cannot run this test at all".
+
+The runner calls test functions directly, so fixture-taking, parametrized and
+async tests are out of its reach.  Those must not be reported as ``1``, which
+every caller reads as "the tests failed, so the mutation was zapped"; they get
+this code instead and are re-run through the real pytest command.
+
+pytest itself only ever exits 0-5, so this cannot collide with a verdict.  The
+generated runner script declares the same value; ``tests/parallel/
+test_lightweight_fallback.py`` keeps the two in step.
+"""
 
 
 def build_lightweight_command(
@@ -40,3 +58,39 @@ def build_lightweight_command(
         return None
 
     return [test_command[0], str(runner_path), *test_ids]
+
+
+def run_lightweight_with_fallback(
+    test_command: list[str],
+    env_vars: dict[str, str],
+    run_command: Callable[[list[str]], subprocess.CompletedProcess[bytes]],
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the tests through the lightweight runner, falling back to pytest.
+
+    The fast path is tried first.  When the runner reports that it cannot run
+    the selected tests (:data:`LIGHTWEIGHT_CANNOT_RUN_EXIT_CODE`) the original
+    ``test_command`` — a full pytest invocation with the same node IDs — is run
+    instead, so the gremlin is scored on a real test run rather than on the
+    runner's inability to perform one.  Every other exit code is returned
+    untouched and costs no second run.
+
+    ``run_command`` is supplied by the caller so that each execution path keeps
+    its own subprocess settings (cwd, env, timeout) and its own error handling.
+
+    Args:
+        test_command: The full pytest command, including test node IDs.
+        env_vars: Environment variables that may contain the sources file path.
+        run_command: Runs one command and returns its completed process.
+
+    Returns:
+        The completed process whose exit code should be scored.
+    """
+    lightweight_command = build_lightweight_command(test_command, env_vars)
+    if lightweight_command is None:
+        return run_command(test_command)
+
+    outcome = run_command(lightweight_command)
+    if outcome.returncode != LIGHTWEIGHT_CANNOT_RUN_EXIT_CODE:
+        return outcome
+
+    return run_command(test_command)

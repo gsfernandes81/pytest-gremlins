@@ -41,7 +41,7 @@ from typing import (
 if TYPE_CHECKING:
     import multiprocessing
 
-from pytest_gremlins.parallel.lightweight import build_lightweight_command
+from pytest_gremlins.parallel.lightweight import run_lightweight_with_fallback
 from pytest_gremlins.parallel.pool import WorkerResult
 from pytest_gremlins.parallel.pool_config import PoolConfig
 from pytest_gremlins.reporting.results import GremlinResultStatus
@@ -72,7 +72,8 @@ def _run_gremlin_batch(  # pragma: no cover
 
     Tries the lightweight runner first (skips full pytest startup, ~50ms per
     gremlin instead of ~950ms). Falls back to the standard subprocess approach
-    if the lightweight runner is not available.
+    when the lightweight runner is not available, and per gremlin when the
+    runner reports it cannot run the selected tests.
 
     Args:
         gremlin_ids: List of gremlin IDs to test.
@@ -84,9 +85,6 @@ def _run_gremlin_batch(  # pragma: no cover
     Returns:
         List of WorkerResult for each tested gremlin.
     """
-    lightweight_cmd = build_lightweight_command(test_command, env_vars)
-    effective_command = lightweight_cmd if lightweight_cmd is not None else test_command
-
     results: list[WorkerResult] = []
 
     for gremlin_id in gremlin_ids:
@@ -97,15 +95,21 @@ def _run_gremlin_batch(  # pragma: no cover
         env['ACTIVE_GREMLIN'] = gremlin_id
         env['GREMLIN_ROOTDIR'] = rootdir
 
-        try:
-            result = subprocess.run(  # Intentional: runs pytest test commands
-                effective_command,
+        # env is bound as a default so each iteration's closure keeps its own.
+        def run_command(command: list[str], env: dict[str, str] = env) -> subprocess.CompletedProcess[bytes]:
+            return subprocess.run(  # Intentional: runs pytest test commands
+                command,
                 cwd=rootdir,
                 env=env,
                 capture_output=True,
                 timeout=timeout,
                 check=False,
             )
+
+        try:
+            # The lightweight runner hands the tests back to pytest when it
+            # cannot run them itself.
+            result = run_lightweight_with_fallback(test_command, env_vars, run_command)
 
             execution_time_ms = (time.monotonic() - start_time) * 1000
 

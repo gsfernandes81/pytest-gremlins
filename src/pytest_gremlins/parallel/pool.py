@@ -23,7 +23,7 @@ import subprocess
 import time
 from typing import Self
 
-from pytest_gremlins.parallel.lightweight import build_lightweight_command
+from pytest_gremlins.parallel.lightweight import run_lightweight_with_fallback
 from pytest_gremlins.reporting.results import GremlinResultStatus
 
 logger = logging.getLogger(__name__)
@@ -81,19 +81,20 @@ def _run_gremlin_test(  # pragma: no cover
     env['ACTIVE_GREMLIN'] = gremlin_id
     env['GREMLIN_ROOTDIR'] = rootdir
 
-    # Use lightweight runner if available (skips full pytest startup)
-    lightweight_cmd = build_lightweight_command(test_command, env_vars)
-    effective_command = lightweight_cmd if lightweight_cmd is not None else test_command
-
-    try:
-        result = subprocess.run(  # Intentional: runs pytest test commands
-            effective_command,
+    def run_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(  # Intentional: runs pytest test commands
+            command,
             cwd=rootdir,
             env=env,
             capture_output=True,
             timeout=timeout,
             check=False,
         )
+
+    try:
+        # Use the lightweight runner if available (skips full pytest startup);
+        # it hands the tests back to pytest when it cannot run them itself.
+        result = run_lightweight_with_fallback(test_command, env_vars, run_command)
 
         execution_time_ms = (time.monotonic() - start_time) * 1000
 

@@ -69,7 +69,7 @@ from pytest_gremlins.parallel.aggregator import ResultAggregator
 from pytest_gremlins.parallel.batch_executor import BatchExecutor
 from pytest_gremlins.parallel.fork_executor import ForkExecutor
 from pytest_gremlins.parallel.inprocess_executor import InProcessExecutor
-from pytest_gremlins.parallel.lightweight import build_lightweight_command
+from pytest_gremlins.parallel.lightweight import run_lightweight_with_fallback
 from pytest_gremlins.parallel.pool import WorkerPool
 from pytest_gremlins.reporting.html import (
     HtmlReporter,
@@ -1371,6 +1371,14 @@ def _get_lightweight_runner_script() -> str:
     function-based tests (``test_bar``), with ``-x`` semantics (stop on
     first failure).  Exit 0 = survived, exit 1 = zapped.
 
+    Calling test functions directly means fixtures, parametrization, async
+    tests and pytest's setup protocol are all out of reach.  The runner
+    recognises those before calling anything and exits
+    :data:`~pytest_gremlins.parallel.lightweight.LIGHTWEIGHT_CANNOT_RUN_EXIT_CODE`,
+    which tells the caller to re-run the tests through pytest instead.  An
+    exception raised by a test the runner *did* call is a real failure and
+    still exits 1.
+
     Returns:
         The lightweight runner script source code.
     """
@@ -1378,9 +1386,18 @@ def _get_lightweight_runner_script() -> str:
 """Lightweight test runner for pytest-gremlins — skips full pytest startup."""
 
 import importlib.util
+import inspect
 import json
 import os
 import sys
+
+# Exit 0 means the tests passed and 1 means one of them failed, so a test this
+# runner cannot execute at all needs a third answer. Keep in step with
+# pytest_gremlins.parallel.lightweight.LIGHTWEIGHT_CANNOT_RUN_EXIT_CODE.
+CANNOT_RUN_EXIT_CODE = 77
+
+# A class carrying any of these needs pytest to drive its setup protocol.
+SETUP_PROTOCOL_ATTRS = ('setup_method', 'teardown_method', 'setup_class', 'teardown_class', 'setup', 'teardown')
 
 
 def setup_import_hooks():
@@ -1434,37 +1451,65 @@ def load_test_module(file_path):
     return module
 
 
-def run_test(test_spec, rootdir):
-    """Run a single test from its node ID. Returns True if passed."""
+def ineligible_reason(func):
+    """Return why this callable cannot be run bare, or None if it can."""
+    if not callable(func):
+        return 'is not callable'
+    if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
+        return 'is async and needs an event loop from pytest'
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return 'has a signature that cannot be inspected'
+    for param in parameters.values():
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+        if param.default is param.empty:
+            return 'needs the %r fixture from pytest' % (param.name,)
+    return None
+
+
+def resolve_test(test_spec, rootdir):
+    """Resolve a node ID to a zero-argument callable.
+
+    Returns (callable, None) when the test can be run directly, or
+    (None, reason) when only pytest can run it.
+    """
     parts = test_spec.split('::')
-    file_path = parts[0]
-    full_path = os.path.join(rootdir, file_path)
+    if len(parts) not in (2, 3):
+        return None, 'is not a node ID this runner understands'
+    if any('[' in part for part in parts[1:]):
+        return None, 'is parametrized and needs its params from pytest'
 
     try:
-        module = load_test_module(full_path)
-        if module is None:
-            return False  # Cannot verify = treat as caught
+        module = load_test_module(os.path.join(rootdir, parts[0]))
+    except Exception as exc:
+        return None, 'is in a module that failed to import: %s: %s' % (type(exc).__name__, exc)
+    if module is None:
+        return None, 'is in a module that could not be loaded'
 
-        if len(parts) == 3:
-            cls = getattr(module, parts[1], None)
-            if cls is None:
-                return False  # Cannot verify = treat as caught
-            instance = cls()
-            method = getattr(instance, parts[2], None)
-            if method is None:
-                return False  # Cannot verify = treat as caught
-            method()
-        elif len(parts) == 2:
-            func = getattr(module, parts[1], None)
-            if func is None:
-                return False  # Cannot verify = treat as caught
-            func()
-        else:
-            return False  # Unexpected node ID format = treat as caught
+    if len(parts) == 3:
+        cls = getattr(module, parts[1], None)
+        if cls is None or not isinstance(cls, type):
+            return None, 'is in a class this runner could not find'
+        if cls.__init__ is not object.__init__:
+            return None, 'is in a class with its own __init__'
+        if any(hasattr(cls, name) for name in SETUP_PROTOCOL_ATTRS):
+            return None, 'is in a class using pytest setup/teardown'
+        try:
+            func = getattr(cls(), parts[2], None)
+        except Exception as exc:
+            return None, 'is in a class that could not be instantiated: %s: %s' % (type(exc).__name__, exc)
+    else:
+        func = getattr(module, parts[1], None)
 
-        return True
-    except Exception:
-        return False
+    if func is None:
+        return None, 'could not be found in its module'
+
+    reason = ineligible_reason(func)
+    if reason is not None:
+        return None, reason
+    return func, None
 
 
 def setup_pythonpath(rootdir):
@@ -1512,7 +1557,15 @@ def main():
 
     test_specs = sys.argv[1:]
     for spec in test_specs:
-        if not run_test(spec, rootdir):
+        func, reason = resolve_test(spec, rootdir)
+        if func is None:
+            sys.stderr.write('pytest-gremlins: cannot run %s directly: it %s\\n' % (spec, reason))
+            sys.exit(CANNOT_RUN_EXIT_CODE)
+        try:
+            func()
+        except Exception:
+            # The test ran and raised: that is a real failure, so the mutation
+            # was caught. Stop here, as -x does.
             sys.exit(1)
 
     sys.exit(0)
@@ -2895,19 +2948,20 @@ def _test_gremlin(
         sources_file = instrumented_dir / 'sources.json'
         env[GREMLIN_SOURCES_ENV_VAR] = str(sources_file)
 
-    # Use lightweight runner if available (skips full pytest startup)
-    lightweight_cmd = build_lightweight_command(test_command, env)
-    effective_command = lightweight_cmd if lightweight_cmd is not None else test_command
-
-    try:
-        subprocess_outcome = subprocess.run(  # Intentional: runs pytest test commands
-            effective_command,
+    def run_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(  # Intentional: runs pytest test commands
+            command,
             cwd=str(rootdir),
             env=env,
             capture_output=True,
             timeout=30,
             check=False,
         )
+
+    try:
+        # Use the lightweight runner if available (skips full pytest startup);
+        # it hands the tests back to pytest when it cannot run them itself.
+        subprocess_outcome = run_lightweight_with_fallback(test_command, env, run_command)
 
         # pytest uses specific exit codes. Only exit code 1 means tests ran
         # and failed (i.e. the mutation was caught). Other non-zero exit codes
