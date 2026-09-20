@@ -102,6 +102,13 @@ logger = logging.getLogger(__name__)
 
 GREMLIN_SOURCES_ENV_VAR = 'PYTEST_GREMLINS_SOURCES_FILE'
 
+BASELINE_TIMEOUT_SECONDS = 300
+"""How long the baseline run may take before it is reported as a failure.
+
+It runs the whole selected suite once, so it is given far longer than the
+per-gremlin timeout, which runs only the tests covering one mutation.
+"""
+
 
 def _get_rootdir(config: pytest.Config) -> Path:
     """Return the rootdir of the pytest session as a Path.
@@ -199,6 +206,10 @@ class GremlinSession:
             stripped (see :func:`_addopts_without_cov`), threaded into the subprocess
             runs as ``-o addopts=<...>`` so collection-affecting options such as
             ``--import-mode=importlib`` survive (issue #424).  ``''`` clears all addopts.
+        baseline_check: Whether to run the selected tests once with no gremlin
+            active and require them to pass before scoring anything.
+        baseline_failure: Why the baseline run was not green, or ``None`` when it
+            was green or was not run.
     """
 
     enabled: bool = False
@@ -240,6 +251,8 @@ class GremlinSession:
     test_name_to_node_ids: dict[str, list[str]] = field(default_factory=dict)
     explain_gremlin_id: str | None = None
     preserved_addopts: str = ''
+    baseline_check: bool = True
+    baseline_failure: str | None = None
 
 
 _gremlin_session: GremlinSession | None = None
@@ -550,6 +563,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help='Disable coverage-guided test selection (slow but useful for debugging).',
     )
     group.addoption(
+        '--gremlin-no-baseline-check',
+        action='store_true',
+        default=False,
+        dest='gremlin_no_baseline_check',
+        help=(
+            'Skip the baseline run. By default the selected tests are run once with no '
+            'gremlin active and mutation testing is refused unless they pass.'
+        ),
+    )
+    group.addoption(
         '--gremlin-explain',
         action='store',
         default=None,
@@ -749,6 +772,7 @@ def pytest_configure(config: pytest.Config) -> None:
             max_pardons_pct=toml_max_pardons_pct,
             max_pardons=toml_max_pardons,
             no_coverage_filter=bool(getattr(config.option, 'gremlin_no_coverage_filter', False)),
+            baseline_check=not bool(getattr(config.option, 'gremlin_no_baseline_check', False)),
             explain_gremlin_id=getattr(config.option, 'gremlin_explain', None),
             xdist_active=xdist_active,
             xdist_workers=xdist_worker_int if xdist_active else None,
@@ -1606,6 +1630,76 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # n
     gremlin_session.results = _dispatch_mutation_run(session, gremlin_session)
 
 
+def _baseline_is_not_green(gremlin_session: GremlinSession, rootdir: Path) -> bool:
+    """Run the baseline check when it is enabled and record any failure.
+
+    Args:
+        gremlin_session: The current gremlin session.
+        rootdir: Root directory of the project.
+
+    Returns:
+        True when the session must not be scored.
+    """
+    if not gremlin_session.baseline_check:
+        return False
+    gremlin_session.baseline_failure = _run_baseline_check(gremlin_session, rootdir)
+    return gremlin_session.baseline_failure is not None
+
+
+def _run_baseline_check(gremlin_session: GremlinSession, rootdir: Path) -> str | None:
+    """Run the selected tests once with no gremlin active.
+
+    A mutation score is only meaningful against a green baseline: if the tests
+    do not pass unmutated, every gremlin is "caught" for a reason that is not
+    the mutation and the report reads as a perfect score.  The run uses the same
+    command the mutation loop uses — real pytest, through the bootstrap that
+    installs the import hooks — with ``ACTIVE_GREMLIN`` cleared, so it exercises
+    the path every gremlin will take.
+
+    Args:
+        gremlin_session: The current gremlin session.
+        rootdir: Root directory of the project.
+
+    Returns:
+        A description of why the baseline is not green, or None when it is
+        green or there were no tests to run.
+    """
+    test_names = list(gremlin_session.test_node_ids)
+    if not test_names:
+        return None
+
+    command = _build_filtered_test_command(
+        _build_test_command(gremlin_session.instrumented_dir, gremlin_session.preserved_addopts),
+        test_names,
+        gremlin_session,
+    )
+
+    env = os.environ.copy()
+    env.pop(ACTIVE_GREMLIN_ENV_VAR, None)
+    env['GREMLIN_ROOTDIR'] = str(rootdir)
+    if gremlin_session.instrumented_dir is not None:
+        env[GREMLIN_SOURCES_ENV_VAR] = str(gremlin_session.instrumented_dir / 'sources.json')
+
+    try:
+        outcome = subprocess.run(  # Intentional: runs pytest test commands
+            command,
+            cwd=str(rootdir),
+            env=env,
+            capture_output=True,
+            timeout=BASELINE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f'the baseline run timed out after {BASELINE_TIMEOUT_SECONDS} seconds'
+
+    if outcome.returncode == 0:
+        return None
+
+    tail = outcome.stdout.decode(errors='replace').strip().splitlines()[-5:]
+    detail = '\n'.join(f'  {line}' for line in tail)
+    return f'pytest exited {outcome.returncode} with no gremlin active\n{detail}'
+
+
 def _maybe_short_circuit_for_explain(gremlin_session: GremlinSession) -> bool:
     """Run ``--gremlin-explain`` if requested and report whether to bail out.
 
@@ -1624,7 +1718,13 @@ def _dispatch_mutation_run(
     session: pytest.Session,
     gremlin_session: GremlinSession,
 ) -> list[GremlinResult]:
-    """Pick the execution mode (batch / parallel / default) and run it."""
+    """Pick the execution mode (batch / parallel / default) and run it.
+
+    Nothing is run at all unless the baseline is green: a score taken against
+    failing tests says nothing about the mutations.
+    """
+    if _baseline_is_not_green(gremlin_session, _get_rootdir(session.config)):
+        return []
     if gremlin_session.batch_enabled:
         return _run_batch_mutation_testing(session, gremlin_session)
     if gremlin_session.parallel_enabled:
@@ -2988,6 +3088,29 @@ def _write_json_report(score: MutationScore, rootdir: Path) -> Path:
     return output_path
 
 
+def _report_baseline_failure(terminalreporter: pytest.TerminalReporter, reason: str) -> None:
+    """Explain the red baseline and end the session without a score.
+
+    Args:
+        terminalreporter: The terminal reporter to write to.
+        reason: Why the baseline run was not green.
+    """
+    terminalreporter.write_sep('=', 'pytest-gremlins baseline check failed')
+    terminalreporter.write_line('')
+    terminalreporter.write_line(f'The selected tests did not pass with no gremlin active: {reason}')
+    terminalreporter.write_line('')
+    terminalreporter.write_line(
+        'No mutation score was produced. Against a red baseline every gremlin is '
+        'caught for a reason that is not the mutation, so the score would read as '
+        'near-perfect no matter how weak the tests are.'
+    )
+    terminalreporter.write_line('')
+    terminalreporter.write_line('Fix the failing tests, or pass --gremlin-no-baseline-check to score anyway.')
+    terminalreporter.write_line('')
+    terminalreporter.write_sep('=', '')
+    pytest.exit('pytest-gremlins: refusing to score mutations against a red baseline', returncode=1)
+
+
 def pytest_terminal_summary(  # noqa: C901, PLR0912, PLR0915
     terminalreporter: pytest.TerminalReporter,
     exitstatus: int,  # noqa: ARG001
@@ -3022,6 +3145,10 @@ def pytest_terminal_summary(  # noqa: C901, PLR0912, PLR0915
             )
         terminalreporter.write_line('')
         terminalreporter.write_sep('=', '')
+        return
+
+    if gremlin_session.baseline_failure is not None:
+        _report_baseline_failure(terminalreporter, gremlin_session.baseline_failure)
         return
 
     score = MutationScore.from_results(gremlin_session.results)

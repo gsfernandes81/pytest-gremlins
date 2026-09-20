@@ -167,10 +167,14 @@ def _make_session_finish_mocks(
     mock_gremlin = MagicMock()  # Gremlin is a frozen dataclass; spec= misses instance fields; bare-mock: ok
     mock_gremlin.file_path = str(tmp_path / 'src' / 'mod.py')
 
+    # baseline_check=False: these tests are about the pre-scan cov reload, and a
+    # baseline run would spawn a real pytest subprocess for a test node ID that
+    # does not exist.
     gremlin_session = GremlinSession(
         enabled=True,
         gremlins=[mock_gremlin],
         test_node_ids={'tests/test_mod.py::test_foo': 'tests/test_mod.py::test_foo'},
+        baseline_check=False,
     )
 
     return mock_session, gremlin_session

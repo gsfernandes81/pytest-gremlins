@@ -31,6 +31,7 @@ All command-line options are prefixed with `--gremlin` or `--gremlins`.
 | `--gremlin-targets` | string | auto-discovered | Comma-separated list of files/directories to mutate (see [precedence](#configuration-precedence)) |
 | `--gremlin-exclude` | string | none | Glob pattern to exclude from mutation (repeatable, overrides pyproject.toml) |
 | `--gremlin-report` | string | `console` | Report format: `console`, `html`, or `json` (repeatable: pass multiple times to combine formats) |
+| `--gremlin-no-baseline-check` | flag | `false` | Skip the baseline run (see [Baseline check](#baseline-check)) |
 
 ### Performance Options
 
@@ -57,6 +58,21 @@ All command-line options are prefixed with `--gremlin` or `--gremlins`.
 | `--gremlin-audit-pardons` | flag | `false` | List all active suppression pragmas with location, reason, and justification |
 | `--gremlin-max-pardons-pct` | float | disabled | Fail if pardoned gremlins exceed this percentage of total |
 | `--max-pardons` | integer | disabled | Fail if absolute pardoned gremlin count exceeds N |
+
+### Baseline check
+
+Before any gremlin is tested, pytest-gremlins runs the selected tests once with no
+gremlin active. If they do not pass, no mutation score is produced and the run
+exits non-zero.
+
+A mutation score only means something against a green baseline. When the tests
+already fail — or cannot run in the subprocess at all — every gremlin is reported
+as zapped for a reason that is not the mutation, and the score reads as
+near-perfect no matter how weak the tests are.
+
+The check costs one extra run of the selected tests per session, and stops at the
+first failure. Pass `--gremlin-no-baseline-check` to skip it if you know your
+suite is red and want a score anyway.
 
 ### Usage Examples
 
