@@ -757,8 +757,14 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+# The guard answers "is xdist importable?", which is not the same question as
+# "are xdist's hookspecs registered?".  ``-p no:xdist`` leaves xdist importable
+# while deactivating the plugin, so the spec is absent and pluggy's
+# check_pending() would reject an unmarked hook.  optionalhook=True says a
+# missing spec is expected.
 if _XDIST_AVAILABLE:
 
+    @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(node: _XdistWorkerNode) -> None:
         """Inject gremlins tmpdir into xdist worker input for PRIVATE coverage mode.
 
@@ -825,6 +831,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 if _XDIST_AVAILABLE:
 
+    @pytest.hookimpl(optionalhook=True)
     def pytest_xdist_node_collection_finished(node: object, ids: list[str]) -> None:  # noqa: ARG001
         """Capture item IDs reported by the first xdist worker after it finishes collection.
 
