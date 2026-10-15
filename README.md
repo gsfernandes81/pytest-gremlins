@@ -139,8 +139,8 @@ doesn't find your code, configure paths explicitly:
 
 ```toml
 [tool.pytest-gremlins]
-# Operators to use (default: all 5)
-operators = ["comparison", "arithmetic", "boolean", "boundary", "return"]
+# Operators to use (default: cargo-mutants' set)
+operators = ["fn_value", "binary_operator", "unary_operator", "match_arm", "match_arm_guard", "struct_field"]
 
 # Paths to mutate (optional -- auto-discovered from setuptools metadata)
 paths = ["src"]

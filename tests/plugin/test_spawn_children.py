@@ -47,7 +47,7 @@ class DescribeSpawnChildren:
         pytester_with_markers.makepyfile(test_target=_TEST)
 
         result = pytester_with_markers.runpytest_subprocess(
-            '--gremlins', '--gremlin-targets=target.py', *runner_options
+            '--gremlins', '--gremlin-targets=target.py', '--gremlin-operators=arithmetic', *runner_options
         )
 
-        result.stdout.fnmatch_lines(['*Zapped: 2 gremlins (100%)*'])
+        result.stdout.fnmatch_lines(['*Zapped: 1 gremlins (100%)*'])

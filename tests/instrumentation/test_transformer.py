@@ -11,9 +11,19 @@ from pytest_gremlins.instrumentation.transformer import (
     collect_gremlins,
     create_gremlins_for_node,
     generate_comparison_mutations,
+    get_default_registry,
     transform_source,
 )
+from pytest_gremlins.operators import (
+    LEGACY_OPERATORS,
+    GremlinOperator,
+)
 from pytest_gremlins.operators.comparison import ComparisonOperator
+
+
+def _legacy_operators() -> list[GremlinOperator]:
+    """The operators these tests were written for, which are no longer the default."""
+    return get_default_registry().get_all(enabled=list(LEGACY_OPERATORS))
 
 
 @pytest.mark.small
@@ -217,7 +227,7 @@ class DescribeMultiOperatorTransformer:
 def calculate(x, y):
     return x + y
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         assert any(g.operator_name == 'arithmetic' for g in gremlins)
 
@@ -226,7 +236,7 @@ def calculate(x, y):
 def check(a, b):
     return a and b
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         assert any(g.operator_name == 'boolean' for g in gremlins)
 
@@ -235,7 +245,7 @@ def check(a, b):
 def is_adult(age):
     return age >= 18
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         boundary_gremlins = [g for g in gremlins if g.operator_name == 'boundary']
         assert len(boundary_gremlins) == 2
@@ -245,7 +255,7 @@ def is_adult(age):
 def get_value():
     return 42
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         return_gremlins = [g for g in gremlins if g.operator_name == 'return']
         assert len(return_gremlins) == 1
@@ -259,7 +269,7 @@ def complex_function(x, y):
         return True
     return False
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         operator_names = {g.operator_name for g in gremlins}
         assert 'comparison' in operator_names
@@ -273,7 +283,7 @@ def complex_function(x, y):
 def negate(x):
     return not x
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         assert any(g.operator_name == 'boolean' for g in gremlins)
         assert any('not' in g.description.lower() for g in gremlins)
@@ -283,7 +293,7 @@ def negate(x):
 def check():
     return True
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         # True/False mutations come from boolean operator, not return
         boolean_gremlins = [g for g in gremlins if g.operator_name == 'boolean']
@@ -294,7 +304,7 @@ def check():
 def bitwise(x, y):
     return x & y
 """
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         # BitAnd is not a supported arithmetic operator
         # But return mutation should still work
@@ -307,7 +317,7 @@ def check(x):
     return x
 """
         # No boolean operations, just testing that visitor handles code without them
-        gremlins, _tree = transform_source(source, 'example.py')
+        gremlins, _tree = transform_source(source, 'example.py', operators=_legacy_operators())
 
         return_gremlins = [g for g in gremlins if g.operator_name == 'return']
         assert len(return_gremlins) == 1

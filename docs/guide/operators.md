@@ -5,18 +5,84 @@ targets specific code patterns and generates gremlin variants that your tests sh
 
 ## Overview
 
-pytest-gremlins ships with five built-in operators, each designed to catch different categories
-of bugs:
+The default operators are cargo-mutants' mutation genres, read for Python: one operator per
+genre, with cargo-mutants' replacement tables. Five older operators remain available by name.
 
-| Operator | Target | Bug Category |
-|----------|--------|--------------|
-| `comparison` | `<`, `<=`, `>`, `>=`, `==`, `!=` | Off-by-one errors, boundary bugs |
-| `boundary` | Integer constants in comparisons | Boundary condition bugs |
-| `boolean` | `and`, `or`, `not`, `True`, `False` | Logic errors |
-| `arithmetic` | `+`, `-`, `*`, `/`, `//`, `%`, `**` | Calculation errors |
-| `return` | Return statements | Return value verification |
+| Operator | Default | Target |
+|----------|---------|--------|
+| `fn_value` | yes | Whole function bodies, replaced with a value of the return type |
+| `binary_operator` | yes | Comparisons, `and`/`or`, arithmetic, bitwise and shift operators, `op=` |
+| `unary_operator` | yes | `not`, unary `-` and `~`, deleted |
+| `match_arm` | yes | `match` arms, deleted when a `case _:` arm is present |
+| `match_arm_guard` | yes | `match` arm guards, replaced with `True` and `False` |
+| `struct_field` | yes | Keys written after a `**` spread in a dict display, deleted |
+| `comparison` | no | `<`, `<=`, `>`, `>=`, `==`, `!=` |
+| `boundary` | no | Integer constants in comparisons |
+| `boolean` | no | `and`, `or`, `not`, `True`, `False` |
+| `arithmetic` | no | `+`, `-`, `*`, `/`, `//`, `%`, `**` |
+| `return` | no | Return statements |
 
-## Built-in Operators
+## The cargo-mutants operators
+
+### fn_value
+
+Replaces a function's body with `return <value>`, the value guessed from the return annotation:
+
+| Return annotation | Replacements |
+|-------------------|--------------|
+| none, `None`, or any other type | `None` |
+| `bool` | `True`, `False` |
+| `int` | `0`, `1`, `-1` |
+| `float` | `0.0`, `1.0`, `-1.0` |
+| `str` | `''`, `'xyzzy'` |
+| `bytes` | `b''`, `b'\x00'`, `b'\x01'` |
+| `T \| None`, `Optional[T]` | `None`, then every value of `T` |
+| `list[T]`, `Sequence[T]` | `[]`, then `[v]` for every value of `T` |
+| `set[T]`, `frozenset[T]` | empty, then one element of every value of `T` |
+| `dict[K, V]`, `Mapping[K, V]` | `{}`, then `{k: v}` for every pair |
+| `tuple[A, B]` | the product of every value of `A` and `B` |
+| `tuple[T, ...]` | `()`, then `(v,)` for every value of `T` |
+| `Iterator[T]`, `Iterable[T]` | `iter([])`, then `iter([v])` for every value of `T` |
+| `NoReturn`, `Never` | none |
+
+A generator instead becomes empty, then yields one value of its element type. The docstring
+stays. Empty bodies (`pass`, `...`, a docstring), `__init__`, `__new__`, `@abstractmethod` and
+`@overload` functions are not mutated, nor is a replacement identical to the body. The gremlin
+sits on the function's first statement after the docstring: that is the line a pardon goes on,
+and the line coverage maps to the tests that call the function.
+
+### binary_operator
+
+| Original | Replacements |
+|----------|--------------|
+| `==` / `!=` | `!=` / `==` |
+| `<` | `==`, `>`, `<=` |
+| `>` | `==`, `<`, `>=` |
+| `<=` / `>=` | `>` / `<` |
+| `and` / `or` | `or` / `and`, one operator of a chain at a time |
+| `+` | `-`, `*` |
+| `-`, `*` | `+`, `/` |
+| `/`, `//` | `%`, `*` |
+| `%` | `/`, `+` |
+| `<<` / `>>` | `>>` / `<<` |
+| `&` | `\|`, `^` |
+| `\|` | `&`, `^` |
+| `^` | `&`, `\|` |
+| `op=` | the replacements of `op`, except `&=` -> `\|=` and `\|=` -> `&=` only |
+
+`**`, `@`, `is` and `in` have no Rust counterpart and are not mutated. Arithmetic on a string,
+bytes, f-string, list or tuple literal is concatenation, repetition or formatting, where every
+replacement raises `TypeError`; those are not mutated. Annotations are never mutated.
+
+### unary_operator, match_arm, match_arm_guard, struct_field
+
+- `unary_operator` deletes `not`, unary `-` and `~` (Rust's `!` and `-`).
+- `match_arm` deletes each unguarded arm of a `match` that has a `case _:` arm, never `case _:` itself.
+- `match_arm_guard` replaces each guard with `True` and with `False`.
+- `struct_field` deletes each key written after a `**` spread, `{**base, 'name': x}`, Python's
+  counterpart of a Rust struct literal over `..base`.
+
+## Opt-in operators
 
 ### comparison
 

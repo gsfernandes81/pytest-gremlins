@@ -96,6 +96,7 @@ from pytest_gremlins.instrumentation.spawn_hook import (
 )
 from pytest_gremlins.instrumentation.switcher import ACTIVE_GREMLIN_ENV_VAR
 from pytest_gremlins.instrumentation.transformer import (
+    get_default_operators,
     get_default_registry,
     transform_source,
 )
@@ -1017,8 +1018,10 @@ def pytest_configure(config: pytest.Config) -> None:
 
     registry = get_default_registry()
 
-    # Use merged operators or all if none specified
-    operators = registry.get_all(enabled=merged_config.operators) if merged_config.operators else registry.get_all()
+    # Use the configured operators, or cargo-mutants' set if none are configured
+    operators = (
+        registry.get_all(enabled=merged_config.operators) if merged_config.operators else get_default_operators()
+    )
 
     target_paths = _resolve_target_paths(rootdir, merged_config)
 

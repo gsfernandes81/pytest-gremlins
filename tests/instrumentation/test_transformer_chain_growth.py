@@ -20,8 +20,20 @@ from typing import Any
 
 import pytest
 
-from pytest_gremlins.instrumentation.transformer import transform_source
+from pytest_gremlins.instrumentation.transformer import (
+    get_default_registry,
+    transform_source,
+)
+from pytest_gremlins.operators import (
+    LEGACY_OPERATORS,
+    GremlinOperator,
+)
 from pytest_gremlins.plugin import _write_instrumented_sources
+
+
+def _legacy_operators() -> list[GremlinOperator]:
+    """The operators these tests were written for, which are no longer the default."""
+    return get_default_registry().get_all(enabled=list(LEGACY_OPERATORS))
 
 
 def _chained_operation_source(operator: str, terms: int, operand: str = 'x') -> str:
@@ -35,17 +47,17 @@ def _alternating_boolops(levels: int) -> str:
 
 
 def _node_count(source: str) -> int:
-    _, tree = transform_source(source, 'm.py')
+    _, tree = transform_source(source, 'm.py', operators=_legacy_operators())
     return sum(1 for _ in ast.walk(tree))
 
 
 def _gremlin_metadata(source: str) -> list[tuple[str, str, int, int, str]]:
-    gremlins, _ = transform_source(source, 'm.py')
+    gremlins, _ = transform_source(source, 'm.py', operators=_legacy_operators())
     return [(g.gremlin_id, g.operator_name, g.line_number, g.original_node.col_offset, g.description) for g in gremlins]
 
 
 def _call_with_active_gremlin(source: str, active_gremlin_id: str, *args: Any) -> Any:
-    _, tree = transform_source(source, 'm.py')
+    _, tree = transform_source(source, 'm.py', operators=_legacy_operators())
     namespace: dict[str, Any] = {'__gremlin_active__': active_gremlin_id}
     exec(compile(ast.fix_missing_locations(tree), 'm.py', 'exec'), namespace)  # noqa: S102
     return namespace['f'](*args)
@@ -94,7 +106,7 @@ class DescribeGremlinMetadataIsUnchanged:
         ]
 
     def it_produces_one_gremlin_per_term_of_a_thirty_term_sum(self) -> None:
-        gremlins, _ = transform_source(_chained_operation_source('+', 30), 'm.py')
+        gremlins, _ = transform_source(_chained_operation_source('+', 30), 'm.py', operators=_legacy_operators())
 
         assert len(gremlins) == 30
 
@@ -133,7 +145,7 @@ class DescribeThirtyTermSumInstrumentsQuickly:
 
     def it_instruments_a_thirty_term_sum_in_under_a_second(self) -> None:
         started = time.perf_counter()
-        transform_source(_chained_operation_source('+', 30), 'm.py')
+        transform_source(_chained_operation_source('+', 30), 'm.py', operators=_legacy_operators())
 
         assert time.perf_counter() - started < 1
 
@@ -190,7 +202,7 @@ class DescribeVerdictsAreUnchanged:
             '            (b + c))  # gremlin: pardon[equivalent] addition order is not observable here\n'
         )
 
-        gremlins, _ = transform_source(source, 'm.py')
+        gremlins, _ = transform_source(source, 'm.py', operators=_legacy_operators())
 
         assert [g.pardoned for g in gremlins] == [True, False, False]
 
@@ -252,7 +264,7 @@ class DescribeInstrumentAndWritePath:
         module_path.write_text(source)
 
         started = time.perf_counter()
-        _, tree = transform_source(source, str(module_path))
+        _, tree = transform_source(source, str(module_path), operators=_legacy_operators())
         instrumented_sources_dir = _write_instrumented_sources({str(module_path): tree}, tmp_path)
         elapsed = time.perf_counter() - started
 

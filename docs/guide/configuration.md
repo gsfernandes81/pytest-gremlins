@@ -28,7 +28,7 @@ All command-line options are prefixed with `--gremlin` or `--gremlins`.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--gremlins` | flag | `false` | Enable mutation testing |
-| `--gremlin-operators` | string | all | Comma-separated list of operators to use |
+| `--gremlin-operators` | string | cargo-mutants' set | Comma-separated list of operators to use |
 | `--gremlin-targets` | string | auto-discovered | Comma-separated list of files/directories to mutate (see [precedence](#configuration-precedence)) |
 | `--gremlin-exclude` | string | none | Glob pattern to exclude from mutation (repeatable, overrides pyproject.toml) |
 | `--gremlin-report` | string | `console` | Report format: `console`, `html`, or `json` (repeatable: pass multiple times to combine formats) |
@@ -193,13 +193,14 @@ exclude = [
 ]
 
 # Operators to enable (in order of priority)
-# Default: all operators
+# Default: cargo-mutants' set
 operators = [
-    "comparison",
-    "boundary",
-    "boolean",
-    "arithmetic",
-    "return",
+    "fn_value",
+    "binary_operator",
+    "unary_operator",
+    "match_arm",
+    "match_arm_guard",
+    "struct_field",
 ]
 
 # Number of parallel workers (integer or "auto" for os.cpu_count())
@@ -244,7 +245,7 @@ max-pardons-pct = 5.0
 |--------|------|---------|-------------|
 | `paths` | list[string] | auto-discovered | Directories or files to scan for source code (falls back to `src/`) |
 | `exclude` | list[string] | `[]` | Glob patterns for files to exclude |
-| `operators` | list[string] | all | Operators to enable, in priority order |
+| `operators` | list[string] | cargo-mutants' set | Operators to enable, in priority order |
 | `workers` | int or `"auto"` | sequential | No parallelism unless `-n` or `--gremlin-parallel` is used; `"auto"` resolves to `os.cpu_count()` |
 | `cache` | boolean | `false` | Enable incremental analysis cache |
 | `report` | string or list | `"console"` | Report format(s): `"html"`, `"json"`, `"console"`, or a list like `["html", "json"]` |

@@ -12,7 +12,11 @@ import dataclasses
 import hashlib
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING,
+    Protocol,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,13 +24,24 @@ if TYPE_CHECKING:
 from pytest_gremlins.instrumentation.gremlin import Gremlin
 from pytest_gremlins.instrumentation.pragma import parse_pardoned_lines
 from pytest_gremlins.operators import (
+    DEFAULT_OPERATORS,
     ArithmeticOperator,
+    BinaryOperator,
     BooleanOperator,
     BoundaryOperator,
     ComparisonOperator,
+    FnValueOperator,
     GremlinOperator,
+    MatchArmGuardOperator,
+    MatchArmOperator,
     OperatorRegistry,
     ReturnOperator,
+    StructFieldOperator,
+    UnaryOperator,
+)
+from pytest_gremlins.operators.fn_value import (
+    function_shell,
+    split_docstring,
 )
 
 _comparison_operator = ComparisonOperator()
@@ -36,9 +51,36 @@ COMPARISON_MUTATIONS: dict[type[ast.cmpop], list[type[ast.cmpop]]] = ComparisonO
 OP_TO_SYMBOL: dict[type[ast.cmpop], str] = ComparisonOperator.OP_TO_SYMBOL
 
 
+@runtime_checkable
+class DescribingOperator(Protocol):
+    """An operator that describes its own gremlins."""
+
+    def describe(self, original: ast.AST, mutated: ast.AST) -> str:
+        """Return a human-readable description of one gremlin."""
+        ...
+
+
+@runtime_checkable
+class LocatingOperator(Protocol):
+    """An operator whose gremlins sit on a line other than the mutated node's first."""
+
+    def locate(self, original: ast.AST, mutated: ast.AST) -> int:
+        """Return the source line coverage and pardons attribute one gremlin to."""
+        ...
+
+
 def _create_default_registry() -> OperatorRegistry:
-    """Create and populate the default operator registry with all 5 operators."""
+    """Create and populate the default operator registry with every operator.
+
+    Only the cargo-mutants set (``DEFAULT_OPERATORS``) runs unless configured otherwise.
+    """
     registry = OperatorRegistry()
+    registry.register(FnValueOperator)
+    registry.register(BinaryOperator)
+    registry.register(UnaryOperator)
+    registry.register(MatchArmOperator)
+    registry.register(MatchArmGuardOperator)
+    registry.register(StructFieldOperator)
     registry.register(ComparisonOperator)
     registry.register(ArithmeticOperator)
     registry.register(BooleanOperator)
@@ -51,12 +93,23 @@ _default_registry = _create_default_registry()
 
 
 def get_default_registry() -> OperatorRegistry:
-    """Get the default operator registry with all 5 operators registered.
+    """Get the operator registry with every operator registered.
 
     Returns:
-        OperatorRegistry with comparison, arithmetic, boolean, boundary, and return operators.
+        OperatorRegistry with the cargo-mutants operators (fn_value, binary_operator,
+        unary_operator, match_arm, match_arm_guard, struct_field) and the opt-in
+        comparison, arithmetic, boolean, boundary, and return operators.
     """
     return _default_registry
+
+
+def get_default_operators() -> list[GremlinOperator]:
+    """Get the operators that run when none are configured: cargo-mutants' set.
+
+    Returns:
+        A fresh instance of each operator named in ``DEFAULT_OPERATORS``, in order.
+    """
+    return _default_registry.get_all(enabled=list(DEFAULT_OPERATORS))
 
 
 def create_gremlins_for_compare(
@@ -136,11 +189,18 @@ def create_gremlins_for_node(
     for mutated_node in mutations:
         if not isinstance(mutated_node, (ast.expr, ast.stmt)):
             continue  # pragma: no cover
-        description = _get_mutation_description(node, mutated_node, operator)
+        if isinstance(operator, DescribingOperator):
+            description = operator.describe(node, mutated_node)
+        else:
+            description = _get_mutation_description(node, mutated_node, operator)
+        if isinstance(operator, LocatingOperator):
+            line_number = operator.locate(node, mutated_node)
+        else:
+            line_number = getattr(node, 'lineno', 0)
         gremlin = Gremlin(
             gremlin_id=id_generator(),
             file_path=file_path,
-            line_number=getattr(node, 'lineno', 0),
+            line_number=line_number,
             original_node=node,
             mutated_node=mutated_node,
             operator_name=operator.name,
@@ -364,6 +424,39 @@ def build_switching_statement(
     return result  # type: ignore[return-value]
 
 
+def build_switching_body(original: list[ast.stmt], gremlins: list[Gremlin]) -> list[ast.stmt]:
+    """Build a function body that runs the original body or one gremlin's replacement body.
+
+    Each gremlin's ``mutated_node`` is the whole function with its body replaced; its
+    statements after the docstring become the branch taken when that gremlin is active.
+
+    Args:
+        original: The function's (already instrumented) body.
+        gremlins: Gremlins whose mutated nodes are functions.
+
+    Returns:
+        The docstring, if any, then one If statement switching between the bodies.
+    """
+    docstring, statements = split_docstring(original)
+    gremlin_active = ast.Name(id='__gremlin_active__', ctx=ast.Load())
+    result: list[ast.stmt] = statements
+
+    for gremlin in reversed(gremlins):
+        mutated = gremlin.mutated_node
+        if not isinstance(mutated, (ast.FunctionDef, ast.AsyncFunctionDef)):  # pragma: no cover
+            raise TypeError(f'Expected a function gremlin, got {type(mutated).__name__}')
+        _, replacement = split_docstring(copy.deepcopy(mutated.body))
+        condition = ast.Compare(
+            left=gremlin_active,
+            ops=[ast.Eq()],
+            comparators=[ast.Constant(value=gremlin.gremlin_id)],
+        )
+        switch = ast.If(test=condition, body=replacement, orelse=result)
+        result = [ast.copy_location(switch, statements[0])]
+
+    return [*docstring, *result]
+
+
 class MutationSwitchingTransformer(ast.NodeTransformer):
     """AST transformer that replaces mutation points with switching expressions.
 
@@ -380,7 +473,7 @@ class MutationSwitchingTransformer(ast.NodeTransformer):
         self.file_path = file_path
         self.gremlins: list[Gremlin] = []
         self._gremlin_counter = 0
-        self._operators = operators if operators is not None else get_default_registry().get_all()
+        self._operators = operators if operators is not None else get_default_operators()
         # Create a short unique prefix from file path to avoid ID collisions
         # when processing multiple files in parallel
         self._file_prefix = self._make_file_prefix(file_path)
@@ -465,6 +558,96 @@ class MutationSwitchingTransformer(ast.NodeTransformer):
 
         self.gremlins.extend(gremlins)
         return build_switching_expression(node, gremlins)
+
+    def visit_Dict(self, node: ast.Dict) -> ast.expr:
+        """Replace dict displays with mutation switching expressions."""
+        return self._switch_expression_with_pristine_mutations(node)
+
+    def _switch_statement_with_pristine_mutations(self, node: ast.stmt) -> ast.stmt:
+        """Instrument ``node``'s children, then switch ``node`` itself between its mutations.
+
+        The statement counterpart of ``_switch_expression_with_pristine_mutations``.
+        """
+        pristine = copy.deepcopy(node)
+        self.generic_visit(node)
+
+        gremlins = self._create_gremlins_for_node(pristine)
+        if not gremlins:
+            return node
+
+        self.gremlins.extend(gremlins)
+        return build_switching_statement(node, gremlins)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> ast.stmt:
+        """Replace augmented assignments with mutation switching statements."""
+        return self._switch_statement_with_pristine_mutations(node)
+
+    def visit_Match(self, node: ast.Match) -> ast.stmt:
+        """Replace match statements with mutation switching statements."""
+        return self._switch_statement_with_pristine_mutations(node)
+
+    def visit_match_case(self, node: ast.match_case) -> ast.match_case:
+        """Instrument a case's guard and body; a pattern admits only literals, never a switch."""
+        if node.guard is not None:
+            node.guard = self.visit(node.guard)
+        node.body = self._visit_statements(node.body)
+        return node
+
+    def _visit_statements(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        visited: list[ast.stmt] = []
+        for statement in statements:
+            result = self.visit(statement)
+            if isinstance(result, ast.AST):
+                visited.append(result)  # type: ignore[arg-type]
+            elif result is not None:  # pragma: no cover - no visitor here returns a list
+                visited.extend(result)
+        return visited
+
+    def visit_arg(self, node: ast.arg) -> ast.arg:
+        """Leave parameter annotations alone: an annotation is a type, not code under test."""
+        return node
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt:
+        """Instrument an annotated assignment's target and value, never its annotation."""
+        node.target = self.visit(node.target)
+        if node.value is not None:
+            node.value = self.visit(node.value)
+        return node
+
+    def visit_TypeAlias(self, node: ast.stmt) -> ast.stmt:
+        """Leave ``type X = ...`` alone: it is a type, not code under test."""
+        return node
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.stmt:
+        """Instrument a function, then switch its body between the original and each replacement.
+
+        The return annotation and type parameters are not instrumented. The docstring
+        stays the first statement, so ``__doc__`` is the same with any gremlin active.
+        """
+        # Made before the children are instrumented in place, from the pristine body; the
+        # gremlins keep only a shell of the function, never its body, which can be nested
+        # deeper than copying or unparsing recurses.
+        shell = function_shell(node, [ast.copy_location(ast.Expr(ast.Constant(...)), node)])
+        gremlins = [
+            dataclasses.replace(gremlin, original_node=shell) for gremlin in self._create_gremlins_for_node(node)
+        ]
+        node.decorator_list = [self.visit(decorator) for decorator in node.decorator_list]
+        node.args = self.visit(node.args)
+        node.body = self._visit_statements(node.body)
+        if not gremlins:
+            return node
+
+        self.gremlins.extend(gremlins)
+        node.body = build_switching_body(node.body, gremlins)
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.stmt:
+        """Instrument a function and switch its body (see ``_visit_function``)."""
+        return self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.stmt:
+        """Instrument an async function and switch its body (see ``_visit_function``)."""
+        return self._visit_function(node)
 
     def visit_Return(self, node: ast.Return) -> ast.stmt:
         """Replace return statements with mutation switching."""
