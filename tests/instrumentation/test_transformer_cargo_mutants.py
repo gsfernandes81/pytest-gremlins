@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from pytest_gremlins.instrumentation.transformer import transform_source
+from pytest_gremlins.instrumentation.transformer import (
+    get_default_registry,
+    transform_source,
+)
 
 _SOURCE = '''
 from typing import Iterator
@@ -118,3 +121,22 @@ class DescribeCargoMutantsTransform:
 
         assert sum(g.operator_name == 'fn_value' for g in gremlins) == 1
         assert _run(source, None, 'lookup(1000)') == 1001
+
+
+@pytest.mark.small
+class DescribeMainGuard:
+    """``if __name__ == '__main__'`` is never mutated: flipped, importing the module runs it as a script."""
+
+    @pytest.mark.parametrize('guard', ["__name__ == '__main__'", "'__main__' == __name__", "__name__ != '__main__'"])
+    @pytest.mark.parametrize('operators', [None, ['comparison', 'boolean', 'boundary']])
+    def it_leaves_the_guard_alone(self, guard: str, operators: list[str] | None) -> None:
+        enabled = None if operators is None else get_default_registry().get_all(enabled=operators)
+
+        gremlins, _ = transform_source(f'if {guard}:\n    main()\n', 'm.py', operators=enabled)
+
+        assert gremlins == []
+
+    def it_still_mutates_other_comparisons_with_name(self) -> None:
+        gremlins, _ = transform_source("if __name__ == 'pkg.mod':\n    main()\n", 'm.py')
+
+        assert [g.description for g in gremlins] == ['== to !=']

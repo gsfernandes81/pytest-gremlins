@@ -457,6 +457,24 @@ def build_switching_body(original: list[ast.stmt], gremlins: list[Gremlin]) -> l
     return [*docstring, *result]
 
 
+def _is_main_guard(node: ast.Compare) -> bool:
+    """Return True for ``__name__ == '__main__'`` (or ``!=``, either way round).
+
+    Flipped, importing the module runs it as a script: tests cannot tell, and a
+    script that starts a mutation run of its own module recurses without end.
+
+    Examples:
+        >>> _is_main_guard(ast.parse("'__main__' == __name__", mode='eval').body)
+        True
+    """
+    if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+        return False
+    sides = (node.left, node.comparators[0])
+    has_name = any(isinstance(side, ast.Name) and side.id == '__name__' for side in sides)
+    has_main = any(isinstance(side, ast.Constant) and side.value == '__main__' for side in sides)
+    return has_name and has_main
+
+
 class MutationSwitchingTransformer(ast.NodeTransformer):
     """AST transformer that replaces mutation points with switching expressions.
 
@@ -535,7 +553,9 @@ class MutationSwitchingTransformer(ast.NodeTransformer):
         return build_switching_expression(node, gremlins)
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
-        """Replace comparison nodes with mutation switching expressions."""
+        """Replace comparison nodes with mutation switching expressions, except a ``__main__`` guard."""
+        if _is_main_guard(node):
+            return node
         return self._switch_expression_with_pristine_mutations(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> ast.expr:
